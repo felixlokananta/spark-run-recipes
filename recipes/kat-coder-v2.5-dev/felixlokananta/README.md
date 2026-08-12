@@ -49,10 +49,32 @@ prompts; add `"enable_thinking":false` to turn reasoning off entirely.
 `VLLM_MARLIN_USE_ATOMIC_ADD=1`** — the standard Spark tuning that the official
 `qwen3.5-35b-a3b` / `qwen3.6-35b-a3b` recipes use for this same architecture family.
 
+**No `--load-format` on the FP8 recipe.** The Spark has no GPUDirect Storage, so
+fastsafetensors falls back to a host bounce buffer — it reads a whole file into host memory
+before copying it to the device. All three checkpoints matter here:
+
+| Recipe | `.safetensors` files | Largest file | Bounce-buffer peak |
+|---|---|---|---|
+| NVFP4 | 1 | 21.9 GB | ~44 GB |
+| FP8 | 1 | **35.8 GB** | **~72 GB** |
+| BF16 | 13 | ~5.4 GB | ~11 GB above weights |
+
+Host and device are the same 128 GB LPDDR5X pool on a Spark, so the FP8 single-file case
+pays for the weights twice at once and the engine core gets killed mid-load. The failure is
+silent — no Python traceback, just
+`Engine core initialization failed … Failed core proc(s): {}` right after
+`Loading fastsafetensors checkpoint shards: 0/1`. vLLM's default loader mmaps the file and
+copies tensor-by-tensor, so its peak overhead is one tensor. Sharded BF16 and the smaller
+NVFP4 file both stay under the limit, which is why only FP8 drops the flag. Use
+`--load-format runai_streamer` instead if you want the load speed back.
+
 ## Tuning notes
 
-- If startup OOMs, lower `max_model_len` before touching `gpu_memory_utilization` — KV cache
-  scales linearly with it.
+- If startup OOMs, first check *where*. An OOM after the memory-profiling step is a KV-cache
+  budget problem: lower `max_model_len` before touching `gpu_memory_utilization`, since KV
+  scales linearly with it. A silent death *during* `Loading … checkpoint shards` is the
+  loader, not the budget — drop `--load-format fastsafetensors` (see above) and leave
+  `gpu_memory_utilization` alone.
 - `sparkrun show` reports the BF16 recipe at 65.2 GB of weights against a 102.8 GB budget
   (0.85 of the ~121 GB usable pool), leaving ~37 GB. That's comfortable in isolation but leaves
   little for the host — if your Spark is running a desktop session, drop

@@ -35,7 +35,11 @@ defaults:
   max_num_seqs: 32
   kv_cache_dtype: fp8
   attention_backend: flashinfer
-  load_format: fastsafetensors
+  # No --load-format here, unlike the NVFP4 and BF16 recipes. This quant ships as
+  # a single 35.77 GB model.safetensors, and the Spark has no GDS, so
+  # fastsafetensors falls back to a host bounce buffer: ~36 GB host + ~36 GB
+  # device out of one unified 128 GB pool, and the engine core dies mid-load with
+  # no traceback. vLLM's default loader mmaps and copies tensor-by-tensor.
   served_model_name: kat-coder-v2.5-dev
   tool_call_parser: qwen3_coder
   reasoning_parser: qwen3
@@ -57,7 +61,6 @@ command: |
       --max-num-seqs {max_num_seqs} \
       --kv-cache-dtype {kv_cache_dtype} \
       --attention-backend {attention_backend} \
-      --load-format {load_format} \
       --enable-prefix-caching \
       --enable-chunked-prefill \
       --enable-auto-tool-choice \
