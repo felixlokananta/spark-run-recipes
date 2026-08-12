@@ -1,0 +1,43 @@
+recipe_version: "2"
+# Qwen3.6-35B-A3B-Uncensored (HauhauCS "Aggressive") — Q6_K_P GGUF, single DGX Spark node.
+# Higher-fidelity tier (~31 GB). Still leaves most of the 128 GB unified pool free,
+# and decode speed barely moves because only ~3B params are active per token.
+model: HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q6_K_P
+runtime: llama-cpp
+container: ghcr.io/spark-arena/dgx-llama-cpp:latest
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "Qwen3.6-35B-A3B-Uncensored (Aggressive) Q6_K_P GGUF — 35B/3B-active MoE, 128K context, single node."
+  maintainer: "felixlokananta"
+  model_params: 35B
+  model_dtype: q6_k
+  quantization: gguf
+  quant_bits: 6
+  num_layers: 10
+  num_kv_heads: 2
+  head_dim: 256
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  n_gpu_layers: 99
+  ctx_size: 131072
+  temp: 1.0
+  top_p: 0.95
+  top_k: 20
+
+command: |
+  llama-server \
+      -hf {model} \
+      --host {host} \
+      --port {port} \
+      --n-gpu-layers {n_gpu_layers} \
+      --ctx-size {ctx_size} \
+      --temp {temp} \
+      --top-p {top_p} \
+      --top-k {top_k} \
+      --flash-attn on \
+      --jinja

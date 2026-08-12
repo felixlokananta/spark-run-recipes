@@ -1,0 +1,70 @@
+recipe_version: "2"
+# KAT-Coder-V2.5-Dev — NVFP4 (4-bit), single DGX Spark node.
+# Kwaipilot's 35B-A3B agentic coding MoE, Qwen3.5-MoE hybrid architecture
+# (linear attention + full attention every 4th layer). NVFP4 is native to
+# GB10 Blackwell, so this is the recommended tier on a 128 GB Spark: ~22 GB of
+# weights leaves the whole 256K context and a deep batch comfortably resident.
+model: sakamakismile/KAT-Coder-V2.5-Dev-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "KAT-Coder-V2.5-Dev NVFP4 (4-bit) — Kwaipilot 35B/3B-active agentic coding MoE, 256K context, single node."
+  maintainer: "felixlokananta"
+  category: agent
+  model_params: 35B
+  model_dtype: nvfp4
+  quantization: compressed-tensors
+  quant_bits: 4
+  kv_dtype: fp8
+  # Hybrid attention: 40 decoder layers, but only every 4th is full attention,
+  # so just 10 layers contribute to the paged KV cache (~10 KB/token at fp8).
+  num_layers: 10
+  num_kv_heads: 2
+  head_dim: 256
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.7
+  max_model_len: 262144
+  max_num_batched_tokens: 16384
+  max_num_seqs: 32
+  kv_cache_dtype: fp8
+  attention_backend: flashinfer
+  load_format: fastsafetensors
+  served_model_name: kat-coder-v2.5-dev
+  tool_call_parser: qwen3_coder
+  reasoning_parser: qwen3
+  # KAT's chat template keeps prior thinking traces in history when asked to,
+  # which is what the model was RL-trained against for multi-turn agentic work.
+  default_chat_template_kwargs: '{"preserve_thinking":true}'
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --attention-backend {attention_backend} \
+      --load-format {load_format} \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser} \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}' \
+      --language-model-only

@@ -1,0 +1,66 @@
+recipe_version: "2"
+# KAT-Coder-V2.5-Dev — FP8 (W8A8), single DGX Spark node.
+# ~36 GB of weights: the quality-safe middle tier. This quant was republished
+# as a text-only checkpoint (Qwen3_5MoeForCausalLM), so unlike the NVFP4 and
+# BF16 recipes it does NOT need --language-model-only.
+model: debackerl/KAT-Coder-V2.5-Dev-FP8
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "KAT-Coder-V2.5-Dev FP8 (W8A8) — Kwaipilot 35B/3B-active agentic coding MoE, 256K context, single node."
+  maintainer: "felixlokananta"
+  category: agent
+  model_params: 35B
+  model_dtype: fp8
+  quantization: compressed-tensors
+  quant_bits: 8
+  kv_dtype: fp8
+  # Only every 4th of the 40 decoder layers is full attention; the rest are
+  # linear-attention layers with a constant-size recurrent state per sequence.
+  num_layers: 10
+  num_kv_heads: 2
+  head_dim: 256
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.75
+  max_model_len: 262144
+  max_num_batched_tokens: 16384
+  max_num_seqs: 32
+  kv_cache_dtype: fp8
+  attention_backend: flashinfer
+  load_format: fastsafetensors
+  served_model_name: kat-coder-v2.5-dev
+  tool_call_parser: qwen3_coder
+  reasoning_parser: qwen3
+  default_chat_template_kwargs: '{"preserve_thinking":true}'
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --attention-backend {attention_backend} \
+      --load-format {load_format} \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser} \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}'

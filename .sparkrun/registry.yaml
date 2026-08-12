@@ -1,0 +1,5 @@
+registries:
+  - name: felix
+    description: Personal sparkrun recipe registry
+    recipes: recipes
+    mods: mods

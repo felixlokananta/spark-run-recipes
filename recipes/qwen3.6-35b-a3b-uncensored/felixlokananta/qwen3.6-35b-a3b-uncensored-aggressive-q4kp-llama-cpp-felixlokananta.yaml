@@ -1,0 +1,51 @@
+recipe_version: "2"
+# Qwen3.6-35B-A3B-Uncensored (HauhauCS "Aggressive") — Q4_K_P GGUF, single DGX Spark node.
+# Abliterated variant of Qwen/Qwen3.6-35B-A3B: same weights and capabilities,
+# refusal behaviour removed. The repo publishes GGUF only — no safetensors and no
+# config.json — so this runs on llama.cpp, not vLLM.
+# Q4_K_P (~23 GB) is the quant the publisher recommends as the balanced default.
+model: HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4_K_P
+runtime: llama-cpp
+container: ghcr.io/spark-arena/dgx-llama-cpp:latest
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "Qwen3.6-35B-A3B-Uncensored (Aggressive) Q4_K_P GGUF — 35B/3B-active MoE, 128K context, single node."
+  maintainer: "felixlokananta"
+  model_params: 35B
+  model_dtype: q4_k
+  quantization: gguf
+  quant_bits: 4
+  # 40 decoder layers but only every 4th is full attention, so 10 layers feed the
+  # KV cache (2 KV heads x 256 head_dim ~= 20 KB/token at f16).
+  num_layers: 10
+  num_kv_heads: 2
+  head_dim: 256
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  n_gpu_layers: 99
+  # The model card warns to stay at 128K or above or the model loses its thinking
+  # behaviour. Native max is 262144 and the KV cache is cheap here (~2.7 GB at
+  # 131072) — see the README before raising it.
+  ctx_size: 131072
+  # Publisher's general/thinking-mode sampling. Use temp 0.6 for coding.
+  temp: 1.0
+  top_p: 0.95
+  top_k: 20
+
+command: |
+  llama-server \
+      -hf {model} \
+      --host {host} \
+      --port {port} \
+      --n-gpu-layers {n_gpu_layers} \
+      --ctx-size {ctx_size} \
+      --temp {temp} \
+      --top-p {top_p} \
+      --top-k {top_k} \
+      --flash-attn on \
+      --jinja
