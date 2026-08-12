@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local sparkrun output — exports and captured logs written into the repo by
+# hand. Note: .sparkrun/registry.yaml is the tracked registry manifest and is
+# deliberately NOT ignored; sparkrun keeps its own state in ~/.cache/sparkrun.
+*.local.yaml
+*.log
