@@ -1,0 +1,65 @@
+recipe_version: "2"
+# Qwen3.8-27B — BF16 reference weights, single DGX Spark node.
+# ~56 GB of weights out of a ~121 GB usable pool. It fits, but it is the tight
+# tier: run it to check whether a quant is costing you quality, not as a daily
+# driver. 18 shards, largest 3.99 GB.
+model: Qwen/Qwen3.8-27B
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "Qwen3.8-27B BF16 — dense 27B hybrid-attention VLM, 262K context, reference quality, single node."
+  maintainer: "felixlokananta"
+  category: general
+  model_params: 27B
+  model_dtype: bf16
+  kv_dtype: fp8
+  # 16 of the 64 decoder layers are full attention; the rest are Gated DeltaNet.
+  num_layers: 16
+  num_kv_heads: 4
+  head_dim: 256
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.85
+  max_model_len: 262144
+  max_num_batched_tokens: 8192
+  max_num_seqs: 8
+  kv_cache_dtype: fp8
+  attention_backend: flashinfer
+  load_format: fastsafetensors
+  served_model_name: qwen3.8-27b
+  tool_call_parser: qwen3_coder
+  reasoning_parser: qwen3
+  default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
+  limit_mm_per_prompt: '{"image":4,"video":1}'
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --attention-backend {attention_backend} \
+      --load-format {load_format} \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser} \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}'

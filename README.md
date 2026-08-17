@@ -15,6 +15,8 @@ recipes/{model}/{user}/{model}-{quant}-{runtime}-{user}.yaml
   35B/3B-active agentic coding MoE, in NVFP4 / FP8 / BF16. vLLM.
 - [`qwen3.6-35b-a3b-uncensored`](recipes/qwen3.6-35b-a3b-uncensored/felixlokananta/) —
   HauhauCS abliterated Qwen3.6-35B-A3B, GGUF Q4_K_P / Q6_K_P. llama.cpp.
+- [`qwen3.8-27b`](recipes/qwen3.8-27b/felixlokananta/) — Qwen3.8-27B, dense 27B
+  hybrid-attention VLM with MTP, in NVFP4 / FP8 / BF16. vLLM.
 
 ## Use
 
