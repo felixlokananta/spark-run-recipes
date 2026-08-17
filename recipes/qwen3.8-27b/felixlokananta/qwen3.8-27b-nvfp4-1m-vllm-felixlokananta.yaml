@@ -1,0 +1,89 @@
+recipe_version: "2"
+# Qwen3.8-27B — NVFP4 with the context window stretched to 1M via YaRN, single
+# DGX Spark node. Same ~23 GB checkpoint as the plain NVFP4 recipe; what changes
+# is that rope_parameters are overridden at launch to rope_type yarn, factor 4.0
+# over the native 262,144, and the memory budget is re-cut to pay for the KV.
+# This is the long-document tier, not the daily driver — static YaRN applies the
+# same scaling at every prompt length, so short prompts pay for a window they
+# never use. See the README.
+model: unsloth/Qwen3.8-27B-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "Qwen3.8-27B NVFP4 @ 1M context — YaRN factor 4.0 over the native 262K window, MTP speculative decoding, single node."
+  maintainer: "felixlokananta"
+  category: general
+  model_params: 27B
+  model_dtype: nvfp4
+  quantization: compressed-tensors
+  quant_bits: 4
+  kv_dtype: fp8
+  # config.json sets full_attention_interval: 4 over num_hidden_layers: 64, so
+  # only 16 layers feed the paged KV cache. The other 48 hold a constant-size
+  # recurrent state per sequence instead — see the README on max_num_seqs.
+  num_layers: 16
+  num_kv_heads: 4
+  head_dim: 256
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  # 1,000,000 tokens at the measured 37,169 B/token is ~34.6 GiB of KV, on top of
+  # ~21.8 GiB of weights and ~5 GiB of profiling overhead. 0.60 of the ~120 GiB
+  # vLLM sees leaves roughly 10 GiB of slack.
+  gpu_memory_utilization: 0.60
+  # Not the full 1,048,576 the factor allows — the round million keeps that slack.
+  max_model_len: 1000000
+  max_num_batched_tokens: 8192
+  # Halved from the 262K recipe. Each concurrent sequence pins ~151 MB of fp32
+  # Gated DeltaNet state on top of its KV pages, and here the KV pages are the
+  # expensive part.
+  max_num_seqs: 4
+  kv_cache_dtype: fp8
+  attention_backend: flashinfer
+  load_format: fastsafetensors
+  served_model_name: qwen3.8-27b-1m
+  tool_call_parser: qwen3_coder
+  reasoning_parser: qwen3
+  # The template defaults to reasoning_effort xhigh, which is a lot of thinking
+  # tokens at Spark decode speeds. medium is the usable default; see the README.
+  default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
+  limit_mm_per_prompt: '{"image":4,"video":1}'
+  speculative_config: '{"method":"mtp","num_speculative_tokens":5}'
+  # transformers 5.x renamed rope_scaling to rope_parameters, and on this VLM the
+  # text stack lives under text_config. The override replaces the whole dict, so
+  # the four mrope/theta fields have to be restated verbatim from config.json or
+  # multimodal position encoding breaks. factor 4.0 x 262,144 = 1,048,576.
+  hf_overrides: '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144,"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_theta":10000000,"partial_rotary_factor":0.25}}}'
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --attention-backend {attention_backend} \
+      --load-format {load_format} \
+      --hf-overrides '{hf_overrides}' \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --speculative-config '{speculative_config}' \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser} \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}'

@@ -11,14 +11,16 @@ in the same checkpoint.
 
 ## Which recipe
 
-| Recipe | Weights on disk | `gpu_memory_utilization` | Notes |
-|---|---|---|---|
-| `qwen3.8-27b-nvfp4-vllm-felixlokananta` | 23.4 GB | 0.70 | **Start here.** NVFP4 is native to GB10 Blackwell, and MTP is on. |
-| `qwen3.8-27b-fp8-vllm-felixlokananta` | 30.9 GB | 0.75 | Official Qwen quant. Quality-safe middle tier. |
-| `qwen3.8-27b-bf16-vllm-felixlokananta` | 55.6 GB | 0.85 | Reference quality. Fits, but it is the tight tier. |
+| Recipe | Weights on disk | `gpu_memory_utilization` | Context | Notes |
+|---|---|---|---|---|
+| `qwen3.8-27b-nvfp4-vllm-felixlokananta` | 23.4 GB | 0.70 | 262,144 | **Start here.** NVFP4 is native to GB10 Blackwell, and MTP is on. |
+| `qwen3.8-27b-fp8-vllm-felixlokananta` | 30.9 GB | 0.75 | 262,144 | Official Qwen quant. Quality-safe middle tier. |
+| `qwen3.8-27b-bf16-vllm-felixlokananta` | 55.6 GB | 0.85 | 262,144 | Reference quality. Fits, but it is the tight tier. |
+| `qwen3.8-27b-nvfp4-1m-vllm-felixlokananta` | 23.4 GB | 0.60 | 1,000,000 | Same NVFP4 weights, YaRN factor 4.0. Long documents only — see below. |
 
-All three serve the model as `qwen3.8-27b` on port 8000, single node, `-tp 1`, 262,144-token
-context, multimodal.
+All four are single node, `-tp 1`, multimodal, on port 8000. The first three serve as
+`qwen3.8-27b`; the 1M recipe serves as `qwen3.8-27b-1m` so a client can't silently land on a
+different context window than it asked for.
 
 ```bash
 sparkrun recipe validate recipes/qwen3.8-27b/felixlokananta/qwen3.8-27b-nvfp4-vllm-felixlokananta.yaml
@@ -94,6 +96,65 @@ The NVFP4 case is the only close one, and it's the same shape as the KAT NVFP4 c
 with no traceback, that's the loader, not the memory budget — drop the flag or switch to
 `--load-format runai_streamer`.
 
+## The 1M recipe
+
+`qwen3.8-27b-nvfp4-1m-vllm-felixlokananta` is the same checkpoint as the plain NVFP4 recipe with
+the rope config overridden at launch:
+
+```
+--hf-overrides '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":4.0,
+  "original_max_position_embeddings":262144,"mrope_interleaved":true,
+  "mrope_section":[11,11,10],"rope_theta":10000000,"partial_rotary_factor":0.25}}}'
+```
+
+Three things about that JSON are load-bearing. `rope_parameters`, not `rope_scaling` — transformers
+5.x renamed it, and this config.json is stamped `5.8.0.dev0`. Nested under `text_config`, because
+the top-level config here is the multimodal wrapper. And all four of `mrope_interleaved`,
+`mrope_section`, `rope_theta`, `partial_rotary_factor` restated verbatim, because the override
+replaces the dict rather than merging into it — drop them and you lose multimodal position
+encoding along with the model's actual rope base.
+
+Only the 16 full-attention layers have RoPE at all. The 48 Gated DeltaNet layers carry a recurrent
+state with no positional encoding to scale, which is a large part of why this extension is as cheap
+as it is.
+
+**Don't make this your default endpoint.** Every open-source framework implements *static* YaRN:
+factor 4.0 is applied to every prompt regardless of length, so a 3K-token chat pays the same
+interpolation as a 900K-token document and measurably loses quality for it. Qwen's own guidance is
+to set the factor from your typical context, not your maximum. Run the 262K recipe day to day and
+bring this one up when you actually have the document.
+
+**The budget.** A Spark measurement puts the real cost at 37,169 bytes per token — higher than the
+16 × 2 × 4 × 256 = 32 KB the layer math gives, because vLLM counts the MTP head's KV too. At
+1,000,000 tokens that's ~34.6 GiB of cache on top of ~21.8 GiB of weights and ~5 GiB of profiling
+overhead, so `gpu_memory_utilization: 0.60` of the ~120 GiB vLLM sees leaves about 10 GiB of slack.
+The window is set to a round 1,000,000 rather than the 1,048,576 the factor allows, to keep that
+slack; the model card's own vLLM example does the same. If startup OOMs, drop
+`--speculative-config` first — the MTP head is the cheapest thing to give up here and it is the
+only flag whose removal doesn't shrink the window.
+
+Ignore `sparkrun recipe vram` on this recipe in particular. It reports a 2.0x context multiplier
+and room for ~1.97M tokens, which is wrong twice over in the same direction: it halves the weights
+(12.57 GB against 23.4 GB actual, for the reasons in Tuning notes below) and it prices KV with the
+32 KB/token layer math instead of the measured 37,169 B/token. Both errors free up memory that
+isn't there. The window is at 1,000,000 because that is what the measurements support.
+
+**Prefill, not decode, is what you will feel.** Decode holds up fine — ~24.7 tok/s with MTP at
+`num_speculative_tokens: 5`, essentially the 262K figure. Prefill does not: ~1,734 tok/s at 4.5K
+tokens, already down to ~853 tok/s by 48K, and falling from there. A genuine million-token prefill
+is a multi-minute wait before the first token. `--enable-prefix-caching` stops mattering as a nice
+optimization and starts mattering as the difference between a usable session and an unusable one —
+keep the stable part of your context at the *front* of the prompt so it actually hits.
+
+**The unsloth tokenizer bug.** `unsloth/Qwen3.8-27B-NVFP4` originally shipped `tokenizer.json` with
+truncation hardcoded on — `"truncation": {"direction": "Right", "max_length": 2048, …}` where
+Qwen's own repo has `"truncation": null`. Prompts were silently cut at 2048 tokens with no warning,
+and image requests failed outright once visual tokens crossed that line. Unsloth has fixed it, but
+it is worth knowing the shape of: on a 1M-context recipe, a model that quietly ignores everything
+past the first two thousand tokens looks exactly like a model that is bad at long context. If you
+pulled this checkpoint early, `grep truncation` in your HF cache copy of `tokenizer.json` before
+debugging anything else.
+
 ## Sampling
 
 vLLM picks these up from `generation_config.json`; set them client-side if you override.
@@ -116,9 +177,8 @@ vLLM picks these up from `generation_config.json`; set them client-side if you o
   `max_model_len` first, since KV scales linearly with it. Before that, it's the loader.
 - BF16 at 0.85 leaves ~47 GB above the weights, which is comfortable in isolation but not if
   your Spark is also running a desktop session. Drop to 0.80 and `max_model_len` 131072 there.
-- For the 1M-token window, add YaRN rope scaling per the model card and expect to cut
-  `max_num_seqs` to 2–4. A Spark measurement reached ~778K KV tokens at
-  `gpu_memory_utilization: 0.45` with `max_num_seqs: 4`.
+- For the 1M-token window use the `-1m` recipe rather than hand-editing this one; the YaRN
+  override is fiddly enough to get subtly wrong. See "The 1M recipe" above.
 - MXFP4 quants of this model don't work on NVIDIA — no linear-attention support. NVFP4 is the
   4-bit path.
 
