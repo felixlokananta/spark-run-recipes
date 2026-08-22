@@ -18,6 +18,9 @@ recipes/{model}/{user}/{model}-{quant}-{runtime}-{user}.yaml
 - [`qwen3.8-27b`](recipes/qwen3.8-27b/felixlokananta/) — Qwen3.8-27B, dense 27B
   hybrid-attention VLM with MTP, in NVFP4 / FP8 / BF16, plus an NVFP4 variant stretched
   to 1M context with YaRN. vLLM.
+- [`qwen3.8-27b-uncensored`](recipes/qwen3.8-27b-uncensored/felixlokananta/) —
+  orcarouter abliterated Qwen3.8-27B, block-FP8, with MTP speculative decoding on a
+  batch-size ladder. Gated checkpoint. vLLM.
 
 ## Use
 

@@ -1,0 +1,91 @@
+recipe_version: "2"
+# Qwen3.8-27B-Uncensored — orcarouter's abliterated Qwen3.8-27B in block-FP8,
+# single DGX Spark node, with MTP speculative decoding turned up aggressively.
+#
+# Same architecture as the stock qwen3.8-27b recipes: dense 27B hybrid VLM, 64
+# decoder layers of which every 4th is full attention and the other 48 are Gated
+# DeltaNet. ~30.9 GB of weights in 7 shards. The refusal direction is
+# orthogonalized out of 131 residual-writing matrices; the vision tower and the
+# MTP draft head are copied through untouched.
+#
+# NOTE: the source repo is gated (auto-approve). Accept the terms on the model
+# page and have HF_TOKEN in the sparkrun host environment before running —
+# recipe `env:` values are NOT interpolated from the host. See the README.
+model: orcarouter/Qwen3.8-27B-Uncensored-FP8
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "Qwen3.8-27B-Uncensored FP8 — abliterated dense 27B hybrid-attention VLM, 262K context, aggressive MTP speculative decoding, single node."
+  maintainer: "felixlokananta"
+  category: general
+  model_params: 27B
+  model_dtype: fp8
+  quantization: fp8
+  quant_bits: 8
+  kv_dtype: fp8
+  # 16 of the 64 decoder layers are full attention; the rest are Gated DeltaNet
+  # and hold a recurrent state instead of KV pages. See the README.
+  num_layers: 16
+  num_kv_heads: 4
+  head_dim: 256
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  gpu_memory_utilization: 0.75
+  max_model_len: 262144
+  max_num_batched_tokens: 8192
+  # Each concurrent sequence pins ~151 MB of fp32 Gated DeltaNet state on top of
+  # its KV pages. 8 also caps the drafting ladder below — concurrency is what
+  # makes deep speculation stop paying, so the two numbers are set together.
+  max_num_seqs: 8
+  kv_cache_dtype: fp8
+  attention_backend: flashinfer
+  # 7 shards, largest 4.97 GB, ~36 GB bounce-buffer peak — well under the
+  # ceiling that forced the KAT-Coder FP8 recipe to drop this flag.
+  load_format: fastsafetensors
+  served_model_name: qwen3.8-27b-uncensored
+  tool_call_parser: qwen3_coder
+  reasoning_parser: qwen3
+  default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
+  limit_mm_per_prompt: '{"image":4,"video":1}'
+  # Aggressive MTP. num_speculative_tokens is the ceiling; the per-batch-size
+  # ladder is what actually runs, and vLLM clamps every rung to the ceiling.
+  # 6 draft tokens at batch 1-2, decaying to 2 at batch 7-8. The head is one
+  # decoder layer (mtp_num_hidden_layers: 1) reused autoregressively, so each
+  # extra draft token re-reads ~0.4 GB against the ~31 GB the verify pass reads —
+  # roughly 1.3% added cost per token on a bandwidth-bound Spark. That is why
+  # going deeper than the usual 3 pays here. Ranges are inclusive, must start
+  # at 1, and must not overlap.
+  speculative_config: '{"method":"mtp","num_speculative_tokens":6,"num_speculative_tokens_per_batch_size":[[1,2,6],[3,4,4],[5,6,3],[7,8,2]]}'
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --attention-backend {attention_backend} \
+      --load-format {load_format} \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --speculative-config '{speculative_config}' \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser} \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}'
