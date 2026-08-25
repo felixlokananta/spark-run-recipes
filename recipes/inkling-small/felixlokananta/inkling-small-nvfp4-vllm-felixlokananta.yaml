@@ -1,0 +1,80 @@
+recipe_version: "2"
+# Inkling-Small — NVFP4, two DGX Spark nodes. Start here.
+# ~171 GB of weights on disk, which is more than one Spark's 128 GB unified
+# pool holds, so this recipe is cluster-only: min_nodes 2, -tp 2. It is a
+# 276B/12B-active MoE (6 of 256 routed experts + 2 shared, per token) with a
+# hybrid attention stack — 35 of 42 layers are sliding-window at 512 tokens,
+# only 7 are global — which is why a 262K window costs almost nothing here.
+# Natively multimodal: text, image and audio in, text out.
+model: thinkingmachines/Inkling-Small-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 2
+max_nodes: 4
+
+metadata:
+  description: "Inkling-Small NVFP4 — 276B/12B-active multimodal MoE (text+image+audio), 262K context, two-node TP."
+  maintainer: "felixlokananta"
+  category: general
+  model_params: 276B
+  model_dtype: nvfp4
+  kv_dtype: bfloat16
+  # Only 7 of the 42 decoder layers are global attention — config.json lists the
+  # other 35 in text_config.local_layer_ids, and those run a 512-token sliding
+  # window whose state is per-sequence, not per-token. Reporting 7 here keeps the
+  # estimator from pricing the paged cache 6x too high. See the README.
+  num_layers: 7
+  num_kv_heads: 8
+  head_dim: 128
+  # Measured from the repo: 166.3 GB across 9 shards. Cluster total, not per node.
+  # The estimator has no chance on this config.json — no top-level num_hidden_layers,
+  # a nested text_config, and NVFP4 weights stored as packed uint8.
+  model_vram: 166.3
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  # 2 Spark nodes, one GPU each. Weights land at ~77 GiB per node.
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.80
+  max_model_len: 262144
+  max_num_batched_tokens: 8192
+  # Concurrency is cheap on this architecture: the 512-token sliding window costs
+  # ~37 MB per sequence per node, not a share of the context budget.
+  max_num_seqs: 16
+  # All three of these are Inkling-specific and all three are required — the
+  # tokenizer is tiktoken-backed, and both parsers read the model's own
+  # <|content_thinking|> / <|content_invoke_tool_json|> control tokens.
+  tokenizer_mode: inkling
+  reasoning_parser: inkling
+  tool_call_parser: inkling
+  served_model_name: inkling-small
+  limit_mm_per_prompt: '{"image":4,"audio":2}'
+  # chat_template.jinja defaults reasoning_effort to 0.9 ("high"), which is a lot
+  # of thinking tokens at Spark decode speeds. "medium" maps to 0.7. See the README.
+  default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
+
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --tokenizer-mode {tokenizer_mode} \
+      --reasoning-parser {reasoning_parser} \
+      --tool-call-parser {tool_call_parser} \
+      --enable-auto-tool-choice \
+      --kernel-config.enable_flashinfer_autotune=False \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}' \
+      --enable-prefix-caching \
+      --trust-remote-code

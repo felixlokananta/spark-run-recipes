@@ -1,0 +1,71 @@
+recipe_version: "2"
+# Inkling-Small — NVFP4 at the full 1M window, two DGX Spark nodes.
+# Same checkpoint and same flags as the 262K recipe; only the window and the
+# memory posture change. There is no rope override here and no YaRN: Inkling
+# has no RoPE at all. Long context comes from relative attention (d_rel 16,
+# rel_extent 1024) plus attention-logit log scaling above 128K tokens
+# (log_scaling_n_floor / log_scaling_alpha), all trained in. A short prompt on
+# this recipe is treated exactly as it would be on the 262K one.
+# What you pay for instead is prefill time. See the README.
+model: thinkingmachines/Inkling-Small-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 2
+max_nodes: 4
+
+metadata:
+  description: "Inkling-Small NVFP4 at 1M context — 276B/12B-active multimodal MoE, two-node TP, long-document work."
+  maintainer: "felixlokananta"
+  category: general
+  model_params: 276B
+  model_dtype: nvfp4
+  kv_dtype: bfloat16
+  num_layers: 7
+  num_kv_heads: 8
+  head_dim: 128
+  model_vram: 166.3
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  # 1,000,000 tokens of paged cache is ~13.4 GiB per node on top of ~77 GiB of
+  # weights. 0.86 of the ~120 GiB vLLM sees leaves roughly 6 GiB of slack.
+  gpu_memory_utilization: 0.86
+  # Round million rather than the 1,048,576 config.json allows, to keep the slack.
+  max_model_len: 1000000
+  max_num_batched_tokens: 8192
+  max_num_seqs: 4
+  tokenizer_mode: inkling
+  reasoning_parser: inkling
+  tool_call_parser: inkling
+  # Distinct served name so a client can't silently land on a different window
+  # than it asked for.
+  served_model_name: inkling-small-1m
+  limit_mm_per_prompt: '{"image":4,"audio":2}'
+  default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
+
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --tokenizer-mode {tokenizer_mode} \
+      --reasoning-parser {reasoning_parser} \
+      --tool-call-parser {tool_call_parser} \
+      --enable-auto-tool-choice \
+      --kernel-config.enable_flashinfer_autotune=False \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}' \
+      --enable-prefix-caching \
+      --trust-remote-code
