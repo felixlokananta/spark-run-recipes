@@ -1,0 +1,81 @@
+recipe_version: "2"
+# Ornith-1.5-35B-A3B — NVFP4 stretched to 1M context with YaRN, single node.
+# Same checkpoint as the 262K recipe; only the rope config and the window
+# change. Note the override key is rope_parameters, not the rope_scaling the
+# model card shows — this config.json is a transformers 5.x one and already
+# carries a rope_parameters dict. The override replaces that dict rather than
+# merging into it, so every mrope field has to be restated. See the README.
+model: ornith-ai/Ornith-1.5-35B-A3B-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 1
+max_nodes: 2
+
+metadata:
+  description: "Ornith-1.5-35B-A3B NVFP4 at 1M context — YaRN factor 4.0 over the 262K native window. Long documents only."
+  maintainer: "felixlokananta"
+  category: coding
+  model_params: 35B
+  model_dtype: nvfp4
+  # quant_method is "modelopt" (ModelOpt 0.45.0) and quant_algo is
+  # MIXED_PRECISION; neither is in sparkrun's recognized set, and nvfp4 is the
+  # accurate label for the tier that dominates the weights. See the README.
+  quantization: nvfp4
+  quant_bits: 4
+  kv_dtype: fp8
+  num_layers: 10
+  num_kv_heads: 2
+  head_dim: 256
+  model_vram: 23.4
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  # 1,000,000 tokens is ~10.5 GiB of fp8 cache on top of ~22 GiB of weights.
+  # 0.70 of the ~120 GiB vLLM sees is still far more pool than that needs.
+  gpu_memory_utilization: 0.70
+  max_model_len: 1000000
+  max_num_batched_tokens: 8192
+  max_num_seqs: 8
+  kv_cache_dtype: fp8
+  attention_backend: flashinfer
+  load_format: fastsafetensors
+  # Distinct served name so a client can't silently land on a different window
+  # — or a different rope config — than it asked for.
+  served_model_name: ornith-1.5-35b-a3b-1m
+  tool_call_parser: qwen3_xml
+  reasoning_parser: qwen3
+  limit_mm_per_prompt: '{"image":4,"video":1}'
+  speculative_config: '{"method":"mtp","num_speculative_tokens":3}'
+  hf_overrides: '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144,"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_theta":10000000,"partial_rotary_factor":0.25}}}'
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+  # max_position_embeddings is 262144; without this vLLM refuses the window.
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --attention-backend {attention_backend} \
+      --load-format {load_format} \
+      --hf-overrides '{hf_overrides}' \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --speculative-config '{speculative_config}' \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser} \
+      --trust-remote-code

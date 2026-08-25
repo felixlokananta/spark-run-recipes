@@ -1,0 +1,90 @@
+recipe_version: "2"
+# Ornith-1.5-35B-A3B — NVFP4, single DGX Spark node. Start here.
+# ~23.4 GB of weights, native to GB10 Blackwell. Qwen3.5-MoE architecture:
+# 40 layers, of which only every 4th is full attention; the other 30 are
+# Gated DeltaNet linear attention. 256 experts, 8 active per token, ~3B
+# activated of 35B total. The checkpoint ships the vision tower AND the MTP
+# draft head in the same three shards, so it runs multimodal and with
+# speculative decoding without fetching anything else.
+model: ornith-ai/Ornith-1.5-35B-A3B-NVFP4
+runtime: vllm
+container: ghcr.io/spark-arena/dgx-vllm-eugr-nightly:latest
+
+min_nodes: 1
+max_nodes: 2
+
+metadata:
+  description: "Ornith-1.5-35B-A3B NVFP4 — 35B/3B-active agentic-coding MoE VLM, 262K context, MTP speculative decoding, single node."
+  maintainer: "felixlokananta"
+  category: coding
+  model_params: 35B
+  model_dtype: nvfp4
+  # quant_method is "modelopt" (ModelOpt 0.45.0) and quant_algo is
+  # MIXED_PRECISION; neither is in sparkrun's recognized set, and nvfp4 is the
+  # accurate label for the tier that dominates the weights. See the README.
+  quantization: nvfp4
+  quant_bits: 4
+  # config.json's kv_cache_scheme is fp8 — the checkpoint was calibrated for a
+  # quantized cache, unlike most NVFP4 quants. See the README.
+  kv_dtype: fp8
+  # text_config.layer_types marks 10 of the 40 layers "full_attention"
+  # (indices 3, 7, 11 … 39). Only those feed the paged KV cache; the other 30
+  # hold a constant-size recurrent state per sequence instead.
+  num_layers: 10
+  num_kv_heads: 2
+  head_dim: 256
+  # 23.4 GB on disk across 3 shards. The estimator applies nominal bits-per-param
+  # to a flat 35B and has no idea this is a MIXED_PRECISION quant.
+  model_vram: 23.4
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  # Deliberately generous. Weights are only ~22 GiB and a full 262K window is
+  # ~2.7 GiB of cache, so 0.70 buys a KV pool many times larger than one
+  # context — which is where the concurrency headroom comes from, not the
+  # context length. See the README.
+  gpu_memory_utilization: 0.70
+  max_model_len: 262144
+  max_num_batched_tokens: 8192
+  # Each concurrent sequence pins ~63 MB of fp32 Gated DeltaNet state on top of
+  # its KV pages. 32 is ~2.0 GiB, which this model can easily afford.
+  max_num_seqs: 32
+  kv_cache_dtype: fp8
+  attention_backend: flashinfer
+  load_format: fastsafetensors
+  served_model_name: ornith-1.5-35b-a3b
+  # The model card names qwen3_xml for vLLM (and qwen3_coder for SGLang).
+  # If the container's vLLM predates the qwen3_xml parser, qwen3_coder reads
+  # the same nested <tool_call><function=…><parameter=…> form.
+  tool_call_parser: qwen3_xml
+  reasoning_parser: qwen3
+  limit_mm_per_prompt: '{"image":4,"video":1}'
+  speculative_config: '{"method":"mtp","num_speculative_tokens":3}'
+
+env:
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      -tp {tensor_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --attention-backend {attention_backend} \
+      --load-format {load_format} \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --speculative-config '{speculative_config}' \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser} \
+      --trust-remote-code

@@ -24,6 +24,9 @@ recipes/{model}/{user}/{model}-{quant}-{runtime}-{user}.yaml
 - [`inkling-small`](recipes/inkling-small/felixlokananta/) — Thinking Machines
   Inkling-Small, 276B/12B-active multimodal MoE (text, image, audio), NVFP4, at 262K
   and 1M context. **Two nodes minimum** — the only cluster-only recipe here. vLLM.
+- [`ornith-1.5-35b-a3b`](recipes/ornith-1.5-35b-a3b/felixlokananta/) — Ornith-1.5-35B-A3B,
+  35B/3B-active agentic-coding MoE VLM with MTP, mixed-precision NVFP4, at 262K and
+  1M context via YaRN. Single node with room to spare. vLLM.
 
 ## Use
 
