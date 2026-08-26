@@ -41,8 +41,8 @@ defaults:
   max_model_len: 262144
   max_num_batched_tokens: 8192
   # Each concurrent sequence pins ~151 MB of fp32 Gated DeltaNet state on top of
-  # its KV pages. 8 also caps the drafting ladder below — concurrency is what
-  # makes deep speculation stop paying, so the two numbers are set together.
+  # its KV pages. Concurrency is also what makes deep speculation stop paying:
+  # at batch 8 the verify pass covers 8 x 7 = 56 tokens and turns compute-bound.
   max_num_seqs: 8
   kv_cache_dtype: fp8
   attention_backend: flashinfer
@@ -54,19 +54,59 @@ defaults:
   reasoning_parser: qwen3
   default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
   limit_mm_per_prompt: '{"image":4,"video":1}'
-  # Aggressive MTP. num_speculative_tokens is the ceiling; the per-batch-size
-  # ladder is what actually runs, and vLLM clamps every rung to the ceiling.
-  # 6 draft tokens at batch 1-2, decaying to 2 at batch 7-8. The head is one
-  # decoder layer (mtp_num_hidden_layers: 1) reused autoregressively, so each
-  # extra draft token re-reads ~0.4 GB against the ~31 GB the verify pass reads —
-  # roughly 1.3% added cost per token on a bandwidth-bound Spark. That is why
-  # going deeper than the usual 3 pays here. Ranges are inclusive, must start
-  # at 1, and must not overlap.
-  speculative_config: '{"method":"mtp","num_speculative_tokens":6,"num_speculative_tokens_per_batch_size":[[1,2,6],[3,4,4],[5,6,3],[7,8,2]]}'
+  # MTP at a flat depth of 6. A per-batch-size ladder used to live here
+  # ([[1,2,6],[3,4,4],[5,6,3],[7,8,2]]) and was reverted: a ladder varies the
+  # verify length at runtime, which makes vLLM downgrade cudagraph_mode
+  # FULL_AND_PIECEWISE -> PIECEWISE. That is expensive here, because each decode
+  # step then replays piecewise graphs seven times (one verify + six sequential
+  # draft-head forwards) and the draft forwards are launch-bound, not
+  # bandwidth-bound. Measured cost of the downgrade: 26.85 t/s total at c2,
+  # 4.45 steps/s, ~148 GB/s effective of Spark's 273 (54%). A flat depth keeps
+  # the verify length fixed, so full graphs survive — same as the other four MTP
+  # recipes here, which never had a ladder and never lost them.
+  #
+  # The head is one decoder layer (mtp_num_hidden_layers: 1) reused
+  # autoregressively: each extra draft token re-reads ~0.4 GB against the ~31 GB
+  # the verify pass reads, ~2.4% for the last two tokens.
+  #
+  # Measured at batch 2 (llama-benchy pp2048/tg512/c2, correct tokenizer):
+  # 2756 accepted of 8196 drafted over 1366 steps, 33.6% acceptance,
+  # mean acceptance length 3.02.
+  #
+  #   pos      1      2      3      4      5      6
+  #   rate  .706   .474   .324   .229   .166   .119
+  #   cum   1.71   2.18   2.50   2.73   2.90   3.02
+  #
+  # Positions 5-6 are worth 0.285 tokens/step: cutting to 4 costs 9.6% of decode
+  # to save ~2.4%. Depth 8 extrapolates to +4.8% for +2.4% — not worth it.
+  #
+  # Acceptance decays *within* a generation, not only with batch size: ~4.7 just
+  # after prefill, ~2.4 by token 512. Benchmark at tg128 and you read 3.72 and
+  # overstate the case for depth; tg512 reads 3.02. Short agentic turns sit near
+  # the top of that band, long creative generation near the bottom.
+  #
+  # WHAT THIS GIVES UP: 6 drafts at batch 7-8 means verifying 56 tokens per
+  # step, where the GPU is compute-bound and extra draft tokens stop being
+  # nearly free. That is what the ladder was for — but high-batch behaviour was
+  # never actually measured, with or without it. Sweep c1 2 4 6 8 before
+  # trusting this under load. On a single-user Spark, c1-2 is where time goes.
+  speculative_config: '{"method":"mtp","num_speculative_tokens":6}'
 
 env:
   VLLM_MARLIN_USE_ATOMIC_ADD: "1"
   FLASHINFER_DISABLE_VERSION_CHECK: "1"
+  # DO NOT re-add VLLM_USE_V2_MODEL_RUNNER=1 on vllm d9fbe526c
+  # (0.26.1rc1.dev1188). It is the documented way to keep full CUDA graphs under
+  # a dynamic verify length, and it does engage — "Using V2 Model Runner",
+  # cudagraph_mode FULL_AND_PIECEWISE — then dies in speculator graph capture on
+  # the 2nd of 15 decode graphs:
+  #   gpu/spec_decode/autoregressive/speculator.py:189 capture()
+  #   -> gpu/input_batch.py:123  assert 0 < num_reqs <= num_tokens
+  # Logged immediately before: "Fused multi-step draft decode is not supported
+  # by attention backend(s) FLASHINFER; falling back to rebuilding attention
+  # metadata between draft steps." Root cause not isolated — could be the
+  # dynamic verify length, could be that FlashInfer fallback. Both Inkling
+  # recipes run V2 fine; neither uses speculative decoding.
 
 command: |
   vllm serve {model} \
