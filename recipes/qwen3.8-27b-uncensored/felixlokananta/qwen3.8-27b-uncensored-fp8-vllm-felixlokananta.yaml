@@ -50,8 +50,9 @@ defaults:
   max_model_len: 262144
   max_num_batched_tokens: 8192
   # Each concurrent sequence pins ~151 MB of fp32 Gated DeltaNet state on top of
-  # its KV pages. Concurrency is also what makes deep speculation stop paying:
-  # at batch 8 the verify pass covers 8 x 7 = 56 tokens and turns compute-bound.
+  # its KV pages. Aggregate throughput is still climbing at 8 (6.0x the c1 rate)
+  # and per-request throughput only sags 9%, so 8 is not a throughput ceiling —
+  # TTFT is what degrades, see the sweep under speculative_config below.
   max_num_seqs: 8
   kv_cache_dtype: fp8
   attention_backend: flashinfer
@@ -107,10 +108,35 @@ defaults:
   # cannot resolve anything below ~7% unless normalised by acceptance length.
   # A tg128 benchmark only samples the high-acceptance opening and reads ~3.7.
   #
-  # WHAT THE FLAT DEPTH GIVES UP: 6 drafts at batch 7-8 means verifying 56
-  # tokens per step, where the GPU is compute-bound and extra draft tokens stop
-  # being nearly free. That is what the ladder was for — but high-batch
-  # behaviour has never been measured, with or without it. Sweep c1 2 4 6 8.
+  # CONCURRENCY SWEEP (pp2048/tg512, --warmup-runs 3, acceptance pooled from
+  # SpecDecoding metrics over each phase). This was run to check what dropping
+  # the ladder gives up at high batch. Answer: nothing.
+  #
+  #    c   accept    len   steps/s   t/s tot   t/s req    %bw    ttft
+  #    1    39.6%   3.377    4.00     13.51     13.51    49.1%    1.4s
+  #    2    41.3%   3.479    4.36     30.34     15.98    53.5%    3.1s
+  #    4    36.8%   3.209    3.73     47.85     13.55    45.7%    8.4s
+  #    6    38.4%   3.303    3.35     66.45     13.45    41.1%   12.3s
+  #    8    38.5%   3.309    3.08     81.44     12.35    37.7%   16.3s
+  #
+  # Acceptance is FLAT with batch size (36.8-41.3%, no trend). The ladder
+  # tapered drafts on the premise that deep speculation stops paying as batch
+  # grows; acceptance says that premise is wrong. The step rate does fall 23%
+  # from c1 to c8 as the verify pass turns compute-bound (49% -> 38% of Spark's
+  # 273 GB/s), so the mechanism is real — it just is not worth tapering for:
+  #
+  #   the ladder would draft 2 at c7-8, giving ~2.29 accepted tokens per seq per
+  #   step against 3.31 at depth 6 — 31% fewer tokens per step. Step time rises
+  #   only 30% across the whole range from 7 verify tokens (c1) to 56 (c8), so
+  #   cutting verify to 24 tokens cannot recover 31%. Flat 6 wins at every level.
+  #
+  # Per-request throughput barely moves (13.51 -> 12.35, -9%) while aggregate
+  # scales 6.0x. The cost of load is TTFT, not throughput: 1.4s -> 16.3s,
+  # because 8 x 2048 = 16,384 prompt tokens hit max_num_batched_tokens 8192 and
+  # every prefill gets chunked while competing with decode ("Running: 4 reqs,
+  # Waiting: 4 reqs" throughout the c8 phase; aggregate prefill sags 1476 ->
+  # 893 t/s). Raise max_num_batched_tokens before touching drafting depth if
+  # interactive latency under load ever matters.
   speculative_config: '{"method":"mtp","num_speculative_tokens":6}'
 
 env:
