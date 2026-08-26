@@ -67,6 +67,17 @@ defaults:
 env:
   VLLM_MARLIN_USE_ATOMIC_ADD: "1"
   FLASHINFER_DISABLE_VERSION_CHECK: "1"
+  # UNDER EVALUATION -- revert if it does not beat the baseline below.
+  # The per-batch-size ladder varies the verify length at runtime, so the stock
+  # runner downgrades cudagraph_mode FULL_AND_PIECEWISE -> PIECEWISE. Each decode
+  # step then replays piecewise graphs seven times (one verify + six sequential
+  # draft-head forwards), and the draft forwards are launch-bound, not
+  # bandwidth-bound. Baseline without this flag: llama-benchy pp2048/tg512/c2 =
+  # 26.85 t/s total, 4.45 steps/s, ~148 GB/s effective of Spark's 273 (54%).
+  # On restart confirm cudagraph_mode stays FULL_AND_PIECEWISE and watch
+  # "Available KV cache memory" -- full capture over the ladder's extra shapes
+  # costs more graph memory, and this recipe already sits near the card ceiling.
+  VLLM_USE_V2_MODEL_RUNNER: "1"
 
 command: |
   vllm serve {model} \
