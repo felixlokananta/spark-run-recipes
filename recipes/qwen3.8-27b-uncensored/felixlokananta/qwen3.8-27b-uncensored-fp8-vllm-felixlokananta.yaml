@@ -37,6 +37,15 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 1
+  # 0.75 yields 54.13 GiB of KV = 1,448,168 tokens = 5.52x concurrency at full
+  # context. An earlier PIECEWISE run reported 69.72 GiB / 7.12x, but that came
+  # off a broken profile (it printed "peak activation -10.19 GiB" and "estimated
+  # CUDA graph memory -12.07 GiB") and left the card at 99.4% occupied. With
+  # full graphs the profiler returns sane numbers and this sits at ~89%.
+  # Headroom remains: startup offers --kv-cache-memory=71493633536 (66.58 GiB,
+  # ~6.8x) to fully utilise, and the graph estimator overshoots actual pool
+  # memory by 1.8 GiB (0.4 actual vs 2.19 estimated) which util 0.768 reclaims.
+  # Untouched so far because every benchmark here ran at 4.5% KV usage.
   gpu_memory_utilization: 0.75
   max_model_len: 262144
   max_num_batched_tokens: 8192
@@ -55,41 +64,53 @@ defaults:
   default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
   limit_mm_per_prompt: '{"image":4,"video":1}'
   # MTP at a flat depth of 6. A per-batch-size ladder used to live here
-  # ([[1,2,6],[3,4,4],[5,6,3],[7,8,2]]) and was reverted: a ladder varies the
-  # verify length at runtime, which makes vLLM downgrade cudagraph_mode
-  # FULL_AND_PIECEWISE -> PIECEWISE. That is expensive here, because each decode
-  # step then replays piecewise graphs seven times (one verify + six sequential
-  # draft-head forwards) and the draft forwards are launch-bound, not
-  # bandwidth-bound. Measured cost of the downgrade: 26.85 t/s total at c2,
-  # 4.45 steps/s, ~148 GB/s effective of Spark's 273 (54%). A flat depth keeps
-  # the verify length fixed, so full graphs survive — same as the other four MTP
-  # recipes here, which never had a ladder and never lost them.
+  # ([[1,2,6],[3,4,4],[5,6,3],[7,8,2]]) and was removed: a ladder varies the
+  # verify length at runtime, so vLLM downgrades cudagraph_mode
+  # FULL_AND_PIECEWISE -> PIECEWISE and decode loses full CUDA graphs. A flat
+  # depth keeps the shape static; startup then reports
+  # "Capturing CUDA graphs (decode, FULL): 8/8", largest=56 = 8 seqs x 7 tokens.
   #
-  # The head is one decoder layer (mtp_num_hidden_layers: 1) reused
-  # autoregressively: each extra draft token re-reads ~0.4 GB against the ~31 GB
-  # the verify pass reads, ~2.4% for the last two tokens.
+  # Measured, llama-benchy pp2048/tg512/c2, correct tokenizer, 3 runs each:
   #
-  # Measured at batch 2 (llama-benchy pp2048/tg512/c2, correct tokenizer):
-  # 2756 accepted of 8196 drafted over 1366 steps, 33.6% acceptance,
-  # mean acceptance length 3.02.
+  #                        t/s    accept len   steps/s   eff. bandwidth
+  #   ladder / PIECEWISE   26.85     3.018       4.45     148 GB/s (54.4%)
+  #   flat 6 / FULL        30.34     3.211       4.73     158 GB/s (57.8%)
+  #
+  # The +13% headline is only half real. Acceptance happened to come out 6.4%
+  # higher on the second run (content luck — llama-benchy samples random corpus
+  # offsets); the step rate, which is what full graphs actually buy, went up
+  # 6.2%. ALWAYS normalise throughput by measured acceptance length before
+  # comparing runs, or the content draw swamps the effect being measured.
+  #
+  # 6.2% and not more because only the verify pass is captured. The six draft
+  # iterations still run eagle_prepare_inputs_padded_kernel and
+  # eagle_step_slot_mapping_metadata_kernel between steps, outside the graph.
+  # 57.8% of Spark's 273 GB/s says there is overhead still on the table.
+  #
+  # DEPTH. The head is one decoder layer (mtp_num_hidden_layers: 1) reused
+  # autoregressively, so each extra draft token re-reads ~0.4 GB against the
+  # ~31 GB the verify pass reads — ~2.4% for the last two tokens. Pooled over
+  # both runs above: 6987 accepted of 19,680 drafted across 3280 steps,
+  # 35.5% acceptance, mean acceptance length 3.13.
   #
   #   pos      1      2      3      4      5      6
-  #   rate  .706   .474   .324   .229   .166   .119
-  #   cum   1.71   2.18   2.50   2.73   2.90   3.02
+  #   rate  .724   .503   .342   .249   .185   .131
+  #   cum   1.72   2.23   2.57   2.82   3.00   3.13
   #
-  # Positions 5-6 are worth 0.285 tokens/step: cutting to 4 costs 9.6% of decode
-  # to save ~2.4%. Depth 8 extrapolates to +4.8% for +2.4% — not worth it.
+  # Positions 5-6 are worth 0.315 tokens/step: cutting to 4 costs 10.1% to save
+  # ~2.4%. Depth 8 extrapolates (decay ratio .707) to +5.1% for +2.4% — but see
+  # the noise floor before trying to measure that.
   #
-  # Acceptance decays *within* a generation, not only with batch size: ~4.7 just
-  # after prefill, ~2.4 by token 512. Benchmark at tg128 and you read 3.72 and
-  # overstate the case for depth; tg512 reads 3.02. Short agentic turns sit near
-  # the top of that band, long creative generation near the bottom.
+  # NOISE FLOOR. Acceptance varies ~6% run to run and swings 1.85-4.83 window to
+  # window, because it decays *within* a generation (~4.3 just after prefill,
+  # ~2.1 by token 512) and depends on the text. Three runs of llama-benchy
+  # cannot resolve anything below ~7% unless normalised by acceptance length.
+  # A tg128 benchmark only samples the high-acceptance opening and reads ~3.7.
   #
-  # WHAT THIS GIVES UP: 6 drafts at batch 7-8 means verifying 56 tokens per
-  # step, where the GPU is compute-bound and extra draft tokens stop being
-  # nearly free. That is what the ladder was for — but high-batch behaviour was
-  # never actually measured, with or without it. Sweep c1 2 4 6 8 before
-  # trusting this under load. On a single-user Spark, c1-2 is where time goes.
+  # WHAT THE FLAT DEPTH GIVES UP: 6 drafts at batch 7-8 means verifying 56
+  # tokens per step, where the GPU is compute-bound and extra draft tokens stop
+  # being nearly free. That is what the ladder was for — but high-batch
+  # behaviour has never been measured, with or without it. Sweep c1 2 4 6 8.
   speculative_config: '{"method":"mtp","num_speculative_tokens":6}'
 
 env:
