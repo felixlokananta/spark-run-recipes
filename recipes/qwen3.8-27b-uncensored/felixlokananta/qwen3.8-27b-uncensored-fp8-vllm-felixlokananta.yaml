@@ -54,6 +54,34 @@ defaults:
   # and per-request throughput only sags 9%, so 8 is not a throughput ceiling —
   # TTFT is what degrades, see the sweep under speculative_config below.
   max_num_seqs: 8
+  # DEPTH SWEEP (pp2048/tg256/c2, depth 0 / 32768 / 131072). Acceptance is the
+  # proxy for whether uncalibrated fp8 KV (q/k/v scale 1.0, see the startup
+  # warnings) degrades long-range attention. It does not move at all:
+  #
+  #   depth   accept    len   mean t/s   peak t/s   peak/req    ttft   prefill
+  #       0    42.5%   3.552     32.18      50.50      29.25    3.7s      1110
+  #   32768    42.7%   3.564     10.85      49.50      26.75   73.7s       782
+  #  131072    42.4%   3.542      2.19      42.50      25.75  342.1s       595
+  #
+  # CAVEAT: MTP predicts the TARGET MODEL'S OWN output, so flat acceptance shows
+  # the model stays self-consistent, not that it is using the context correctly.
+  # This rules out gross fp8 corruption; it is not a retrieval eval. Run
+  # needle-in-a-haystack before trusting 131K+ for anything that matters.
+  #
+  # IGNORE the mean t/s column — it measures prefill, not decode. Decode at 131K
+  # is fine: 2 seqs read 10.5 GB of KV on top of 33.4 GB of weights = 1.32x the
+  # depth-0 traffic, and peak throughput drops only 16% (50.5 -> 42.5), which is
+  # what that arithmetic predicts. The mean collapses because 262,144 prompt
+  # tokens at ~766 t/s means ONE 8192-token prefill chunk takes 10.7s, so any
+  # co-running decode emits one token per 10.7s step. The log shows exactly
+  # "Drafted: 6 tokens" per 10s window throughout the prefill — one step.
+  #
+  # So max_num_batched_tokens cuts both ways: raising it shortens TTFT under
+  # high concurrency at depth 0, and lengthens the decode stall that a long
+  # prefill inflicts on anything sharing the server. 8192 is the compromise.
+  #
+  # KV pressure is not the limit — 2 seqs at 131K peaked at 29.3% of the cache.
+  # The 5.52x concurrency figure only binds at the full 262144 max_model_len.
   kv_cache_dtype: fp8
   attention_backend: flashinfer
   # 7 shards, largest 4.97 GB, ~36 GB bounce-buffer peak — well under the
