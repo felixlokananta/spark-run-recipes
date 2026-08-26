@@ -63,10 +63,16 @@ defaults:
   #   32768    42.7%   3.564     10.85      49.50      26.75   73.7s       782
   #  131072    42.4%   3.542      2.19      42.50      25.75  342.1s       595
   #
-  # CAVEAT: MTP predicts the TARGET MODEL'S OWN output, so flat acceptance shows
-  # the model stays self-consistent, not that it is using the context correctly.
-  # This rules out gross fp8 corruption; it is not a retrieval eval. Run
-  # needle-in-a-haystack before trusting 131K+ for anything that matters.
+  # Acceptance alone could not settle this — MTP predicts the target model's own
+  # output, so it shows self-consistency, not correct use of the context. So
+  # tools/niah.py was run: 4 context lengths x 5 needle depths, distinct code
+  # per cell, temperature 0. 20/20 exact matches, every one finish_reason=stop,
+  # no truncation, through 131K at every depth. fp8 KV is cleared for retrieval.
+  #
+  # BOUND ON THAT CLAIM: needle-in-a-haystack is single-fact, lexically
+  # distinctive, exact-match recall — the easiest long-context task there is —
+  # and bf16 KV was never run as a control. This shows no gross corruption, not
+  # that fp8 is free. Multi-hop or aggregation over long context is untested.
   #
   # IGNORE the mean t/s column — it measures prefill, not decode. Decode at 131K
   # is fine: 2 seqs read 10.5 GB of KV on top of 33.4 GB of weights = 1.32x the
@@ -82,6 +88,14 @@ defaults:
   #
   # KV pressure is not the limit — 2 seqs at 131K peaked at 29.3% of the cache.
   # The 5.52x concurrency figure only binds at the full 262144 max_model_len.
+  #
+  # PREFIX CACHING is worth ~1.7x on prefill, which no llama-benchy run ever
+  # showed (it samples random corpus offsets, so hit rate read 0.0% every time).
+  # The NIAH grid exposed it, because needle depth controls how much leading
+  # haystack is shared with the previous cell — latency falls monotonically with
+  # depth at every context length, 1.47x-1.69x from depth 0 to depth 100, and
+  # implied prefill at 131K goes 596 -> 1011 t/s. Agentic and chat traffic have
+  # shared prefixes; synthetic benchmarks mostly do not. Keep it enabled.
   kv_cache_dtype: fp8
   attention_backend: flashinfer
   # 7 shards, largest 4.97 GB, ~36 GB bounce-buffer peak — well under the
@@ -90,6 +104,14 @@ defaults:
   served_model_name: qwen3.8-27b-uncensored
   tool_call_parser: qwen3_coder
   reasoning_parser: qwen3
+  # Costs ~87 reasoning tokens on EVERY response regardless of triviality: over
+  # 20 NIAH queries whose answers were ~13 tokens, reasoning was 87% of each
+  # completion (68-125 tokens), about 7s of added latency per reply at
+  # single-stream decode rates. Try "low" if using this conversationally.
+  # Note also that message.reasoning_content came back empty on every one of
+  # those responses while usage.completion_tokens_details.reasoning_tokens
+  # reported 68-125 — content is clean, but do not rely on that field to
+  # retrieve the thinking without checking it first on this build.
   default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
   limit_mm_per_prompt: '{"image":4,"video":1}'
   # MTP at a flat depth of 6. A per-batch-size ladder used to live here
