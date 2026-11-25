@@ -1,0 +1,118 @@
+recipe_version: "2"
+# Qwen3.8-Flash-Next — NVIDIA's FP4-Local quant, single DGX Spark node.
+#
+# This is NOT the FP8 checkpoint. unsloth/Qwen3.8-Flash-Next-FP8 is 172.8 GiB,
+# and even with its 47.7 GiB n-gram table on NVMe it needs 125 GiB resident,
+# which one Spark (~121 GiB visible) does not have. FP4-Local is 95.1 GiB, of
+# which 26.8 GiB is the n-gram (PLE) table read from NVMe at run time, leaving
+# ~68.3 GiB of weights in unified memory. See the README.
+model: nvidia/Qwen3.8-Flash-Next-FP4-Local
+runtime: vllm
+# Pinned on purpose: the checkpoint's compressed NVFP4 scales are not readable by
+# upstream vLLM, so the usual dgx-vllm-eugr-nightly will not load it. This is the
+# tag NVIDIA publishes its Spark numbers against
+# (sha256:03a956544e9f9b4b7ba91690469fbe7848bdbef29a7d2e0f5788368467bb3595).
+container: eugr/spark-vllm-b12x:nightly-20261015
+
+min_nodes: 1
+max_nodes: 1
+
+metadata:
+  description: "Qwen3.8-Flash-Next FP4-Local — 125B/6B-active hybrid-attention MoE VLM, 262K context, n-gram table on NVMe, MTP, single node."
+  maintainer: "felixlokananta"
+  category: general
+  model_params: 125B
+  # quant_method is "modelopt", quant_algo MIXED_PRECISION: NVFP4 routed experts,
+  # MXFP8 attention. nvfp4 is the accurate label for what dominates the weights.
+  model_dtype: nvfp4
+  quantization: nvfp4
+  quant_bits: 4
+  kv_dtype: fp8
+  # 12 of 48 layers are full attention (Qwen Sparse Attention); the other 36 are
+  # Gated DeltaNet and hold constant-size state per sequence. This undercounts
+  # real KV cost (indexer and MTP layer are extra). See the README.
+  num_layers: 12
+  num_kv_heads: 2
+  head_dim: 256
+  # Resident GiB: 95.1 total minus the 26.8 GiB n-gram table left on NVMe.
+  model_vram: 68.3
+
+# The n-gram table is read with io_uring, which Docker's default seccomp profile
+# blocks. Rootless sparkrun sets security_opt to just no-new-privileges, so that
+# is restated here alongside the seccomp opening. See the README.
+executor_config:
+  security_opt:
+    - no-new-privileges
+    - seccomp=unconfined
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 1
+  pipeline_parallel: 1
+  # Do not raise casually: loading dips to a few GiB of free memory even at 0.8.
+  gpu_memory_utilization: 0.8
+  max_model_len: 262144
+  max_num_batched_tokens: 4096
+  max_num_seqs: 8
+  block_size: 16
+  kv_cache_dtype: fp8
+  load_format: b12x
+  served_model_name: qwen3.8-flash-next
+  tool_call_parser: qwen3_xml
+  reasoning_parser: qwen3
+  limit_mm_per_prompt: '{"image":4,"video":1}'
+  # The template defaults reasoning_effort to xhigh; medium matches the
+  # qwen3.8-27b recipes. Valid: xhigh, medium, low.
+  default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
+  speculative_config: '{"method":"mtp","num_speculative_tokens":4}'
+  compilation_config: '{"pass_config":{"fuse_act_quant":true}}'
+
+# Verbatim from NVIDIA's DGX Spark command for this checkpoint.
+env:
+  VLLM_PLE_TABLE_MEMORY: "disk"
+  B12X_DISK_BACKEND: "io_uring"
+  CUTE_DSL_ARCH: "sm_121a"
+  SAFETENSORS_FAST_GPU: "1"
+  VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+  VLLM_SSM_CONV_STATE_LAYOUT: "DS"
+  VLLM_USE_AOT_COMPILE: "1"
+  VLLM_USE_MEGA_AOT_ARTIFACT: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  B12X_POLICY_MODE: "auto"
+  VLLM_MXFP8_LM_HEAD: "1"
+  VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE: "w13"
+  VLLM_B12X_MOE_FP4_FORCE_A16: "1"
+  B12X_W4A16_A4_PREFILL: "1"
+
+command: |
+  vllm serve {model} \
+      --served-model-name {served_model_name} \
+      --host {host} \
+      --port {port} \
+      --tensor-parallel-size {tensor_parallel} \
+      --pipeline-parallel-size {pipeline_parallel} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --max-model-len {max_model_len} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --max-num-seqs {max_num_seqs} \
+      --block-size {block_size} \
+      --dtype bfloat16 \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --quantization modelopt_mixed \
+      --load-format {load_format} \
+      --mamba-cache-mode align \
+      --gdn-decode-kernel b12x \
+      --linear-backend b12x \
+      --moe-backend b12x \
+      --no-enable-flashinfer-autotune \
+      --mm-encoder-tp-mode data \
+      --limit-mm-per-prompt '{limit_mm_per_prompt}' \
+      --speculative-config '{speculative_config}' \
+      --compilation-config '{compilation_config}' \
+      --default-chat-template-kwargs '{default_chat_template_kwargs}' \
+      --enable-prefix-caching \
+      --enable-chunked-prefill \
+      --enable-auto-tool-choice \
+      --tool-call-parser {tool_call_parser} \
+      --reasoning-parser {reasoning_parser}

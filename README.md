@@ -21,6 +21,9 @@ recipes/{model}/{user}/{model}-{quant}-{runtime}-{user}.yaml
 - [`qwen3.8-27b-uncensored`](recipes/qwen3.8-27b-uncensored/felixlokananta/) —
   orcarouter abliterated Qwen3.8-27B, block-FP8, with flat depth-6 MTP
   speculative decoding. Gated checkpoint. vLLM.
+- [`qwen3.8-flash-next`](recipes/qwen3.8-flash-next/felixlokananta/) — Qwen3.8-Flash-Next,
+  125B/6B-active hybrid-attention MoE VLM with MTP, NVIDIA FP4-Local, 262K context. Single
+  node, with the n-gram table read from NVMe. vLLM (b12x container).
 - [`inkling-small`](recipes/inkling-small/felixlokananta/) — Thinking Machines
   Inkling-Small, 276B/12B-active multimodal MoE (text, image, audio), NVFP4, at 262K
   and 1M context. **Two nodes minimum** — the only cluster-only recipe here. vLLM.
