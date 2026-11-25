@@ -5,9 +5,9 @@ NVIDIA's quantization-aware-distilled FP4 build of Qwen3.8-Flash-Next. 125B para
 active, plus a 51B n-gram embedding table and a 4B MTP head. Text, image and video in; text out.
 262,144-token native context. Single node.
 
-> **Runs on a single Spark; speed not benchmarked here.** Launched on this registry's hardware on
-> 2026-11-24 with sparkrun 0.2.40, before the cache paths were added to `env:`. Startup and memory
-> figures below come from that run; throughput numbers are other people's and are attributed.
+> **Runs on a single Spark; speed not benchmarked here.** Launched three times on this registry's
+> hardware on 2026-11-24/25 with sparkrun 0.2.40. Startup and memory figures below come from those
+> runs; throughput numbers are other people's and are attributed.
 
 ## Why not FP8
 
@@ -36,32 +36,38 @@ sparkrun run recipes/qwen3.8-flash-next/felixlokananta/qwen3.8-flash-next-fp4-lo
 Serves as `qwen3.8-flash-next` on port 8000. Needs ~96 GiB of disk for the checkpoint, on local NVMe:
 the n-gram table is read from the checkpoint files during serving, so a network mount will hurt.
 
-Stop other GPU workloads first. The run here started with 107.1 of 121.6 GiB free. A separate single-Spark
+Stop other GPU workloads first. The runs here started with 107-116 of 121.6 GiB free. A separate single-Spark
 setup with the same image and checkpoint wants ~90 GiB `MemAvailable` before launch and sees it dip to
 3-4 GiB for up to 10 seconds during load.
 
-### First launch
+### Startup time
 
-| Phase | Time |
-|---|---|
-| Checkpoint download, 102 GB | 23 min (27 min for the whole distribution step) |
-| Model load (weights 106 s + 4 s, plus preparation) | 3 min 4 s |
-| b12x autotuning, two passes | 4 min 48 s + 4 min 46 s |
-| JIT kernel warmup | 45 s |
-| **vLLM banner to server start** | **15 min 56 s** |
+| Phase | First launch, no cache paths | Filling the cache | Relaunch |
+|---|---|---|---|
+| Model load | 3 min 4 s | 2 min 40 s | 2 min 34 s |
+| b12x weights preparation | 4 min 48 s | 4 min 50 s | **7 s** |
+| b12x state preparation | 4 min 46 s | 4 min 49 s | **2 s** |
+| JIT kernel warmup | 45 s | 45 s | **0.24 s** |
+| **vLLM banner to server start** | **15 min 56 s** | **15 min 30 s** | **4 min 0 s** |
 
-The log sits in `b12x autotuning` / `b12x compiling` for minutes at a time; that is normal.
+The very first launch also downloads 102 GB (23 min here, 27 min for the whole distribution step). On a
+launch without a warm cache the log sits in `b12x autotuning` / `b12x compiling` for minutes at a time;
+that is normal.
 
 **The cache paths in `env:`.** NVIDIA's command mounts `~/.cache/{vllm,flashinfer,b12x}` and `~/.triton`.
 From its source, rootless sparkrun 0.2.40 sets `HOME=/tmp`, mounts only the Hugging Face cache, and removes
-the container when it stops, so compiled kernels and autotuning results are lost between launches. The
-recipe points those caches at `/cache/huggingface/sparkrun-jit`, inside the mount that persists (normally
-`~/.cache/huggingface/sparkrun-jit` on the host). The run timed above predates this, and **no relaunch has
-been timed with it yet**. The first launch with it is still slow; if it works, the next one logs a nonzero
-`cached` count in the first `b12x` pass instead of `0 cached`.
+the container when it stops, so without these paths compiled kernels and autotuning results are lost. The
+recipe points them at `/cache/huggingface/sparkrun-jit`, inside the mount that persists. The relaunch
+reported 207 and 9 `cached`, with 0 `measured` and 0 `compilations`. The cache is ~470 MB; nothing was
+written under `CUTE_DSL_CACHE_DIR`.
+
+On the host it is `sparkrun-jit` inside your Hugging Face home: `$HF_HOME` if set, else
+`~/.cache/huggingface`, unless sparkrun's own `cache_dir` / `hf_cache_dir` settings override it. Set
+`HF_HOME` with `$HOME`, not a quoted `~`, which the shell does not expand. Deleting the directory clears
+the cache, and the next launch is slow again.
 
 Remove the five paths on sparkrun 0.4.2: it keeps these caches itself and flags them as
-`managed-cache-env`. Deleting the host directory clears the cache.
+`managed-cache-env`.
 
 ## Why the flags look the way they do
 
@@ -89,8 +95,8 @@ Spark can run without offload, at the cost of 26.8 GiB of KV room.
 
 **`table_memory='device'` in the log.** vLLM prints that in its Engram config even though the recipe asks
 for `disk`. The sizes say the table is not resident: the loader read 72.7 GB of the 102 GB checkpoint
-for the main model, and the process used 70.4 GiB, against ~97 GiB with the table in memory. No log line
-names the io_uring backend, so that part is inferred.
+for the main model, and vLLM counted 70-77 GiB used, against ~97 GiB or more with the table in memory. No
+log line names the io_uring backend, so that part is inferred.
 
 **`block_size: 16` does not survive.** vLLM raises the attention block to 3,024 tokens to match the
 recurrent-state page, so ordinary prefix-cache hits land on 3,024-token boundaries. It also keeps
@@ -105,22 +111,28 @@ itself. 0.2.40 does not, so it stays.
 
 ## Memory
 
-Measured here at `gpu_memory_utilization: 0.8`, MTP 4:
+Measured here at `gpu_memory_utilization: 0.8`, MTP 4, over three launches:
 
-| | |
-|---|---|
-| Model load, including the MTP draft | 70.32 GiB |
-| Peak activation / CUDA graphs | 2.01 GiB / 0.16 GiB |
-| KV cache | 24.22 GiB |
-| **KV capacity** | **1,288,711 tokens, 4.92 full 262K windows** |
+| | First launch | Second | Third |
+|---|---|---|---|
+| Free at start | 107.1 GiB | 115.4 GiB | 115.5 GiB |
+| Model load, including the MTP draft | 70.32 GiB | 70.32 GiB | 70.32 GiB |
+| Counted as used | 70.4 GiB | 77.1 GiB | 77.2 GiB |
+| KV cache | 24.2 GiB | 17.6 GiB | 17.4 GiB |
+| **KV capacity, tokens** | 1,288,711 | 935,273 | **928,100** |
+| Full 262K windows | 4.92 | 3.57 | 3.54 |
 
-`sparkrun recipe vram` predicts 28.5 GB for KV and 2.49M tokens, **about 1.9x too many**: it counts 12
+**Plan on about 930K tokens.** The last two agree to within 1%. The first is probably inflated: it started
+with ~8 GiB more in use, and if that was released during startup vLLM would have counted too little as its
+own. That cause is a guess. Cost per token is the same in all three, about 20,200 B.
+
+`sparkrun recipe vram` predicts 28.5 GB for KV and 2.49M tokens, **about 2.7x too many**: it counts 12
 full-attention layers at 12,288 B/token and omits the sparse-attention indexer, the MTP layer, Gated
-DeltaNet state, and activations. The measured cost is about 20,200 B/token.
+DeltaNet state, and activations.
 
-vLLM's log suggests `--kv-cache-memory=36955071488` (34.4 GiB) to "fully utilize" memory. Don't: another
-Spark setup pinned a 31.15 GB pool for 1.58M tokens and `MemAvailable` fell to 6.9 GiB. That setup got
-1.05-1.10M tokens at utilization 0.8 with 3 MTP tokens.
+vLLM's log suggests a `--kv-cache-memory` of 34-36 GiB to "fully utilize" memory. Don't: another Spark
+setup pinned a 31.15 GB pool for 1.58M tokens and `MemAvailable` fell to 6.9 GiB. That setup got 1.05-1.10M
+tokens at utilization 0.8 with 3 MTP tokens.
 
 If loading pushes the box into memory pressure, eugr's current recipe adds
 `PYTORCH_ALLOC_CONF: "per_process_memory_fraction:0.8"` to `env:`. It is not set here because that fix

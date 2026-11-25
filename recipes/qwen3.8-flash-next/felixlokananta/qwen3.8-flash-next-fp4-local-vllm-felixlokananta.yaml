@@ -85,7 +85,7 @@ env:
   VLLM_B12X_MOE_FP4_FORCE_A16: "1"
   B12X_W4A16_A4_PREFILL: "1"
   # Not NVIDIA's: keeps compile/autotune caches on the one mount rootless sparkrun
-  # 0.2.40 persists, which should spare relaunches ~10 min of b12x work (untimed).
+  # 0.2.40 persists. Cuts a relaunch from ~15.5 to 4 min.
   # Remove on sparkrun 0.4.2, which manages these itself. See the README.
   XDG_CACHE_HOME: "/cache/huggingface/sparkrun-jit"  # covers b12x
   VLLM_CACHE_ROOT: "/cache/huggingface/sparkrun-jit/vllm"
