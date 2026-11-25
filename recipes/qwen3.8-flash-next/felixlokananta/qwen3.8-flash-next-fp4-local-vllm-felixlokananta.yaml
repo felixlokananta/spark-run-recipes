@@ -65,7 +65,9 @@ defaults:
   # The template defaults reasoning_effort to xhigh; medium matches the
   # qwen3.8-27b recipes. Valid: xhigh, medium, low.
   default_chat_template_kwargs: '{"reasoning_effort":"medium"}'
-  speculative_config: '{"method":"mtp","num_speculative_tokens":4}'
+  # NVIDIA uses 4. 3 measured faster on prose and concurrent load, slower on
+  # non-thinking code. See the README.
+  speculative_config: '{"method":"mtp","num_speculative_tokens":3}'
   compilation_config: '{"pass_config":{"fuse_act_quant":true}}'
 
 # Verbatim from NVIDIA's DGX Spark command for this checkpoint, up to the cache paths.
