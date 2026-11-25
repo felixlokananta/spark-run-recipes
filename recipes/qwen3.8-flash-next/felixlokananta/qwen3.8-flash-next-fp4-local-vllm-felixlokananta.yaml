@@ -68,7 +68,7 @@ defaults:
   speculative_config: '{"method":"mtp","num_speculative_tokens":4}'
   compilation_config: '{"pass_config":{"fuse_act_quant":true}}'
 
-# Verbatim from NVIDIA's DGX Spark command for this checkpoint.
+# Verbatim from NVIDIA's DGX Spark command for this checkpoint, up to the cache paths.
 env:
   VLLM_PLE_TABLE_MEMORY: "disk"
   B12X_DISK_BACKEND: "io_uring"
@@ -84,6 +84,14 @@ env:
   VLLM_B12X_MOE_FP4_LAYER_MAX_INPUT_SCALE: "w13"
   VLLM_B12X_MOE_FP4_FORCE_A16: "1"
   B12X_W4A16_A4_PREFILL: "1"
+  # Not NVIDIA's: keeps compile/autotune caches on the one mount rootless sparkrun
+  # 0.2.40 persists, which should spare relaunches ~10 min of b12x work (untimed).
+  # Remove on sparkrun 0.4.2, which manages these itself. See the README.
+  XDG_CACHE_HOME: "/cache/huggingface/sparkrun-jit"  # covers b12x
+  VLLM_CACHE_ROOT: "/cache/huggingface/sparkrun-jit/vllm"
+  TRITON_CACHE_DIR: "/cache/huggingface/sparkrun-jit/triton"
+  FLASHINFER_WORKSPACE_BASE: "/cache/huggingface/sparkrun-jit/flashinfer"
+  CUTE_DSL_CACHE_DIR: "/cache/huggingface/sparkrun-jit/cute_dsl"
 
 command: |
   vllm serve {model} \
